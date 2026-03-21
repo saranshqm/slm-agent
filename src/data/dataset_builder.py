@@ -1,9 +1,8 @@
 """
 Dataset builder for PHI-3.5 agentic fine-tuning.
-Creates datasets with tool usage examples and MCP server interactions.
+Enhanced with proper Thought → Action → Observation loops and high diversity.
 """
 
-import os
 import json
 import random
 from typing import List, Dict, Any
@@ -17,7 +16,7 @@ class AgenticExample:
     input: str
     output: str
     tools_used: List[str]
-    complexity: str  # "simple", "medium", "complex"
+    complexity: str
 
 
 class AgenticDatasetBuilder:
@@ -25,7 +24,6 @@ class AgenticDatasetBuilder:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Tool definitions for the agent
         self.available_tools = {
             "web_search": {
                 "description": "Search the web for information",
@@ -37,55 +35,58 @@ class AgenticDatasetBuilder:
             },
         }
 
-    def create_tool_usage_example(
-        self, tool_name: str, scenario: str
-    ) -> AgenticExample:
-        """Create a single tool usage example."""
-        tool_info = self.available_tools[tool_name]
+    # =========================
+    # SINGLE STEP
+    # =========================
+    def create_tool_usage_example(self, tool_name: str, scenario: str) -> AgenticExample:
+        instruction = f"Help me with: {scenario}"
 
-        # Generate instruction based on tool and scenario
-        instructions = {
-            "web_search": f"Search for information about {scenario}",
-            "file_reader": f"Read and analyze the file containing {scenario}",
-        }
+        thought = f"I need to use {tool_name} to gather information about {scenario}."
 
-        instruction = instructions.get(
-            tool_name, f"Use {tool_name} to help with {scenario}"
-        )
+        tool_call = self._generate_tool_call(tool_name, scenario)
 
-        # Generate expected output with proper tool usage format
-        output = self._generate_tool_response(tool_name, scenario, tool_info)
+        observation = self._generate_observation(tool_name, scenario)
+
+        final_answer = f"Based on the gathered information, I have completed the task related to {scenario}."
+
+        output = f"""
+Thought: {thought}
+
+Action:
+{tool_call}
+
+Observation: {observation}
+
+Final Answer: {final_answer}
+"""
 
         return AgenticExample(
             instruction=instruction,
             input="",
-            output=output,
+            output=output.strip(),
             tools_used=[tool_name],
             complexity="simple",
         )
 
-    def create_multi_step_example(
-        self, scenario: str, tools: List[str]
-    ) -> AgenticExample:
-        """Create a multi-step agentic example using multiple tools."""
-        instruction = f"Help me with this multi-step task: {scenario}"
+    # =========================
+    # MULTI STEP
+    # =========================
+    def create_multi_step_example(self, scenario: str, tools: List[str]) -> AgenticExample:
+        instruction = f"Help me with this task: {scenario}"
 
-        output_parts = [
-            "I'll help you with this multi-step task. Let me break it down:\n"
-        ]
+        output_parts = []
 
-        for i, tool in enumerate(tools, 1):
-            tool_info = self.available_tools[tool]
-            output_parts.append(
-                f"Step {i}: I'll use {tool} to {tool_info['description'].lower()}"
-            )
-            output_parts.append(self._generate_tool_call(tool, scenario, tool_info))
-            output_parts.append(
-                f"Based on the {tool} results, I can now proceed to the next step.\n"
-            )
+        for i, tool in enumerate(tools):
+            thought = f"Step {i+1}: I should use {tool} to progress on {scenario}."
+            tool_call = self._generate_tool_call(tool, scenario)
+            observation = self._generate_observation(tool, scenario)
+
+            output_parts.append(f"Thought: {thought}")
+            output_parts.append(f"Action:\n{tool_call}")
+            output_parts.append(f"Observation: {observation}\n")
 
         output_parts.append(
-            "I've completed all the steps successfully. The task is now complete."
+            f"Final Answer: I have completed the multi-step task for {scenario} using the available tools."
         )
 
         return AgenticExample(
@@ -96,51 +97,81 @@ class AgenticDatasetBuilder:
             complexity="complex",
         )
 
-    def _generate_tool_call(
-        self, tool_name: str, scenario: str, tool_info: Dict
-    ) -> str:
-        """Generate a properly formatted tool call."""
-        # Sample parameters based on tool type
+    # =========================
+    # TOOL CALL
+    # =========================
+    def _generate_tool_call(self, tool_name: str, scenario: str) -> str:
         params = self._generate_sample_parameters(tool_name, scenario)
 
-        return f"""
-<tool_use>
+        return f"""<tool_use>
 <tool_name>{tool_name}</tool_name>
 <parameters>
 {json.dumps(params, indent=2)}
 </parameters>
-</tool_use>
-"""
+</tool_use>"""
 
-    def _generate_tool_response(
-        self, tool_name: str, scenario: str, tool_info: Dict
-    ) -> str:
-        """Generate a complete response with tool usage."""
-        response_start = f"I'll use the {tool_name} tool to help with {scenario}.\n"
-        tool_call = self._generate_tool_call(tool_name, scenario, tool_info)
-        response_end = f"\nBased on the {tool_name} results, I've successfully completed your request."
+    # =========================
+    # OBSERVATION (CRITICAL FIX)
+    # =========================
+    def _generate_observation(self, tool_name: str, scenario: str) -> str:
+        """Generate realistic observation matching the tool."""
 
-        return response_start + tool_call + response_end
+        if tool_name == "web_search":
+            return random.choice([
+                f"Found multiple sources discussing {scenario}. Key insights include recent developments and trends.",
+                f"Search results indicate important updates regarding {scenario} across multiple regions.",
+                f"Relevant articles highlight significant findings about {scenario}.",
+            ])
 
-    def _generate_sample_parameters(
-        self, tool_name: str, scenario: str
-    ) -> Dict[str, Any]:
-        """Generate realistic parameters for each tool type."""
-        param_generators = {
-            "web_search": lambda s: {"query": s, "max_results": 5},
-            "file_reader": lambda s: {
-                "file_path": f"/data/{s}.txt",
-                "operation": "read",
+        if tool_name == "file_reader":
+            return random.choice([
+                f"The file contains structured data related to {scenario} with key metrics extracted.",
+                f"Logs indicate patterns and anomalies related to {scenario}.",
+                f"Configuration data reveals important parameters linked to {scenario}.",
+            ])
+
+        return "Tool execution completed successfully."
+
+    # =========================
+    # PARAMETERS
+    # =========================
+    def _generate_sample_parameters(self, tool_name: str, scenario: str) -> Dict[str, Any]:
+        return {
+            "web_search": lambda s: {
+                "query": s,
+                "max_results": random.choice([3, 5, 10]),
             },
-        }
+            "file_reader": lambda s: {
+                "file_path": f"/data/{s.replace(' ', '_')}_{random.randint(1,100)}.txt",
+                "operation": random.choice(["read", "summarize", "analyze"]),
+            },
+        }.get(tool_name, lambda s: {})(scenario)
 
-        return param_generators.get(tool_name, lambda s: {})(scenario)
+    # =========================
+    # SCENARIOS (DIVERSE)
+    # =========================
+    def _generate_random_scenario(self, tool_name: str) -> str:
+        topics = ["AI", "finance", "healthcare", "sports", "climate change"]
+        actions = ["analyze", "compare", "summarize", "investigate"]
+        entities = ["India", "USA", "Tokyo", "Bangalore"]
 
+        return f"{random.choice(actions)} {random.choice(topics)} trends in {random.choice(entities)}"
+
+    def _generate_multi_step_scenario(self) -> str:
+        tasks = [
+            "analyze cost of living between cities",
+            "evaluate system performance using logs",
+            "compare financial performance across companies",
+            "analyze user behavior patterns",
+        ]
+        return random.choice(tasks)
+
+    # =========================
+    # DATASET
+    # =========================
     def generate_dataset(self, num_examples: int = 1000) -> List[Dict[str, Any]]:
-        """Generate a complete dataset for training."""
         examples = []
 
-        # Single tool examples (60% of dataset)
         single_tool_count = int(num_examples * 0.6)
         for _ in range(single_tool_count):
             tool = random.choice(list(self.available_tools.keys()))
@@ -148,10 +179,8 @@ class AgenticDatasetBuilder:
             example = self.create_tool_usage_example(tool, scenario)
             examples.append(self._to_dict(example))
 
-        # Multi-step examples (40% of dataset)
         multi_step_count = num_examples - single_tool_count
         for _ in range(multi_step_count):
-            # num_tools = random.randint(2, 3)
             num_tools = random.randint(2, min(3, len(self.available_tools)))
             tools = random.sample(list(self.available_tools.keys()), num_tools)
             scenario = self._generate_multi_step_scenario()
@@ -160,29 +189,7 @@ class AgenticDatasetBuilder:
 
         return examples
 
-    def _generate_random_scenario(self, tool_name: str) -> str:
-        """Generate random scenarios for different tools."""
-        scenarios = {
-            "web_search": [
-                "latest AI research",
-                "best restaurants in Seattle",
-                "climate change effects",
-            ],
-            "file_reader": ["sales data", "log files", "configuration settings"],
-        }
-
-        return random.choice(scenarios.get(tool_name, ["general information"]))
-
-    def _generate_multi_step_scenario(self) -> str:
-        """Generate scenarios that require multiple tools."""
-        scenarios = [
-            "research and calculate the cost of living comparison between two cities",
-            "read configuration files and calculate system performance metrics",
-        ]
-        return random.choice(scenarios)
-
     def _to_dict(self, example: AgenticExample) -> Dict[str, Any]:
-        """Convert AgenticExample to dictionary format for training."""
         return {
             "instruction": example.instruction,
             "input": example.input,
@@ -191,28 +198,15 @@ class AgenticDatasetBuilder:
             "complexity": example.complexity,
         }
 
-    def save_dataset(
-        self, examples: List[Dict[str, Any]], filename: str = "training_dataset.json"
-    ):
-        """Save dataset to JSON file."""
+    def save_dataset(self, examples: List[Dict[str, Any]], filename: str):
         filepath = self.output_dir / filename
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(examples, f, indent=2, ensure_ascii=False)
 
-        print(f"Dataset saved to {filepath}")
-        print(f"Total examples: {len(examples)}")
-
-        # Print statistics
-        complexities = [ex["complexity"] for ex in examples]
-        tools_used = [len(ex["tools_used"]) for ex in examples]
-
-        print(
-            f"Complexity distribution: {dict(zip(*zip(*[(c, complexities.count(c)) for c in set(complexities)])))}"
-        )
-        print(f"Average tools per example: {sum(tools_used) / len(tools_used):.2f}")
+        print(f"Saved {len(examples)} examples to {filepath}")
 
 
 if __name__ == "__main__":
     builder = AgenticDatasetBuilder()
-    dataset = builder.generate_dataset(num_examples=5000)
+    dataset = builder.generate_dataset(5000)
     builder.save_dataset(dataset, "agentic_training_dataset.json")
