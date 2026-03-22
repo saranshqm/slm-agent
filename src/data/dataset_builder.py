@@ -1,11 +1,11 @@
 """
 Dataset builder for PHI-3.5 agentic fine-tuning.
-Enhanced with proper Thought → Action → Observation loops and high diversity.
+Now generates separate train and eval datasets.
 """
 
 import json
 import random
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -42,9 +42,7 @@ class AgenticDatasetBuilder:
         instruction = f"Help me with: {scenario}"
 
         thought = f"I need to use {tool_name} to gather information about {scenario}."
-
         tool_call = self._generate_tool_call(tool_name, scenario)
-
         observation = self._generate_observation(tool_name, scenario)
 
         final_answer = f"Based on the gathered information, I have completed the task related to {scenario}."
@@ -111,26 +109,24 @@ Final Answer: {final_answer}
 </tool_use>"""
 
     # =========================
-    # OBSERVATION (CRITICAL FIX)
+    # OBSERVATION
     # =========================
     def _generate_observation(self, tool_name: str, scenario: str) -> str:
-        """Generate realistic observation matching the tool."""
-
         if tool_name == "web_search":
             return random.choice([
-                f"Found multiple sources discussing {scenario}. Key insights include recent developments and trends.",
-                f"Search results indicate important updates regarding {scenario} across multiple regions.",
-                f"Relevant articles highlight significant findings about {scenario}.",
+                f"Found multiple sources discussing {scenario}.",
+                f"Search results indicate updates regarding {scenario}.",
+                f"Relevant articles highlight insights about {scenario}.",
             ])
 
         if tool_name == "file_reader":
             return random.choice([
-                f"The file contains structured data related to {scenario} with key metrics extracted.",
-                f"Logs indicate patterns and anomalies related to {scenario}.",
-                f"Configuration data reveals important parameters linked to {scenario}.",
+                f"The file contains structured data related to {scenario}.",
+                f"Logs indicate patterns related to {scenario}.",
+                f"Configuration reveals parameters linked to {scenario}.",
             ])
 
-        return "Tool execution completed successfully."
+        return "Tool execution completed."
 
     # =========================
     # PARAMETERS
@@ -148,7 +144,7 @@ Final Answer: {final_answer}
         }.get(tool_name, lambda s: {})(scenario)
 
     # =========================
-    # SCENARIOS (DIVERSE)
+    # SCENARIOS
     # =========================
     def _generate_random_scenario(self, tool_name: str) -> str:
         topics = ["AI", "finance", "healthcare", "sports", "climate change"]
@@ -167,8 +163,17 @@ Final Answer: {final_answer}
         return random.choice(tasks)
 
     # =========================
-    # DATASET
+    # DATASET GENERATION
     # =========================
+    def _to_dict(self, example: AgenticExample) -> Dict[str, Any]:
+        
+        return {
+            "instruction": example.instruction,
+            "input": example.input,
+            "output": example.output,
+            "tools_used": example.tools_used,
+            "complexity": example.complexity,
+        }
     def generate_dataset(self, num_examples: int = 1000) -> List[Dict[str, Any]]:
         examples = []
 
@@ -189,15 +194,27 @@ Final Answer: {final_answer}
 
         return examples
 
-    def _to_dict(self, example: AgenticExample) -> Dict[str, Any]:
-        return {
-            "instruction": example.instruction,
-            "input": example.input,
-            "output": example.output,
-            "tools_used": example.tools_used,
-            "complexity": example.complexity,
-        }
+    # =========================
+    # TRAIN / EVAL SPLIT
+    # =========================
+    def generate_train_eval_split(
+        self, num_examples: int = 10000, train_ratio: float = 0.9
+    ) -> Tuple[List[Dict], List[Dict]]:
+        dataset = self.generate_dataset(num_examples)
 
+        # 🔥 CRITICAL: shuffle before split
+        random.shuffle(dataset)
+
+        split_idx = int(len(dataset) * train_ratio)
+
+        train_data = dataset[:split_idx]
+        eval_data = dataset[split_idx:]
+
+        return train_data, eval_data
+
+    # =========================
+    # SAVE
+    # =========================
     def save_dataset(self, examples: List[Dict[str, Any]], filename: str):
         filepath = self.output_dir / filename
         with open(filepath, "w", encoding="utf-8") as f:
@@ -205,8 +222,24 @@ Final Answer: {final_answer}
 
         print(f"Saved {len(examples)} examples to {filepath}")
 
+    def save_train_eval_datasets(self, train_data, eval_data):
+        self.save_dataset(train_data, "train_dataset.json")
+        self.save_dataset(eval_data, "eval_dataset.json")
 
+        print("\nDataset split summary:")
+        print(f"Train samples: {len(train_data)}")
+        print(f"Eval samples: {len(eval_data)}")
+
+
+# =========================
+# MAIN
+# =========================
 if __name__ == "__main__":
     builder = AgenticDatasetBuilder()
-    dataset = builder.generate_dataset(5000)
-    builder.save_dataset(dataset, "agentic_training_dataset.json")
+
+    train_data, eval_data = builder.generate_train_eval_split(
+        num_examples=10000,
+        train_ratio=0.9,
+    )
+
+    builder.save_train_eval_datasets(train_data, eval_data)
