@@ -296,7 +296,7 @@ if __name__ == "__main__":
     builder = AgenticDatasetBuilder()
 
     train_data, eval_data = builder.generate_train_eval_split(
-        num_examples=10000,
+        num_examples=4000,
         train_ratio=0.9,
     )
 
