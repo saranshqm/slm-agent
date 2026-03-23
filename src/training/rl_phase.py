@@ -20,6 +20,33 @@ from tool_rl_rewards import score_tool_completion, summarize_batch_rewards
 log = logging.getLogger(__name__)
 
 
+def _patch_dynamic_cache_for_phi3_hub() -> None:
+    """Hub Phi-3 vs Transformers 4.48+: restore seen_tokens, get_max_length, get_usable_length on DynamicCache."""
+    try:
+        from transformers.cache_utils import DynamicCache
+
+        if not hasattr(DynamicCache, "seen_tokens"):
+            DynamicCache.seen_tokens = property(lambda self: self.get_seq_length(0))
+        if not hasattr(DynamicCache, "get_max_length"):
+
+            def get_max_length(self, layer_idx: int = 0) -> int:
+                return self.get_max_cache_shape(layer_idx)
+
+            DynamicCache.get_max_length = get_max_length
+        if not hasattr(DynamicCache, "get_usable_length"):
+
+            def get_usable_length(self, new_seq_length: int, layer_idx: int = 0) -> int:
+                max_length = self.get_max_cache_shape(layer_idx)
+                prev = self.get_seq_length(layer_idx)
+                if max_length is not None and max_length > 0 and prev + new_seq_length > max_length:
+                    return max_length - new_seq_length
+                return prev
+
+            DynamicCache.get_usable_length = get_usable_length
+    except Exception as ex:
+        log.debug("DynamicCache hub-compat patch skipped: %s", ex)
+
+
 def _format_prompt_only(instruction: str, input_text: str | None) -> str:
     if input_text and input_text.strip():
         return (
@@ -175,6 +202,8 @@ def run_rl_phase(config: dict[str, Any], model: torch.nn.Module, tokenizer: Any)
     rl = config.get("rl") or {}
     if not rl.get("enabled", False):
         return
+
+    _patch_dynamic_cache_for_phi3_hub()
 
     device = _get_device(model)
     train_prompts = _load_prompt_dataset(config, "train")
