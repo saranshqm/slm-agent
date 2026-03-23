@@ -47,23 +47,27 @@ def _patch_dynamic_cache_for_phi3_hub() -> None:
         log.debug("DynamicCache hub-compat patch skipped: %s", ex)
 
 
-def _format_prompt_only(instruction: str, input_text: str | None) -> str:
+def _format_prompt_only(tokenizer: Any, system: str, instruction: str, input_text: str | None) -> str:
+    user_msg = instruction
     if input_text and input_text.strip():
-        return (
-            f"### Instruction:\n{instruction}\n\n### Input:\n{input_text.strip()}\n\n### Response:\n"
-        )
-    return f"### Instruction:\n{instruction}\n\n### Response:\n"
+        user_msg += f"\n\nInput:\n{input_text.strip()}"
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": user_msg})
+    return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
 
-def _load_prompt_dataset(config: dict[str, Any], split: str) -> list[str]:
+def _load_prompt_dataset(config: dict[str, Any], split: str, tokenizer: Any) -> list[str]:
     data = config["data"]
     path = data["train_dataset"] if split == "train" else data["eval_dataset"]
     ds = load_dataset("json", data_files=path)["train"]
     prompts: list[str] = []
     for row in ds:
+        system = row.get("system") or ""
         inst = row.get("instruction") or ""
         inp = row.get("input") or ""
-        prompts.append(_format_prompt_only(inst, inp if inp else None))
+        prompts.append(_format_prompt_only(tokenizer, system, inst, inp if inp else None))
     return prompts
 
 
@@ -206,8 +210,8 @@ def run_rl_phase(config: dict[str, Any], model: torch.nn.Module, tokenizer: Any)
     _patch_dynamic_cache_for_phi3_hub()
 
     device = _get_device(model)
-    train_prompts = _load_prompt_dataset(config, "train")
-    eval_prompts = _load_prompt_dataset(config, "eval")
+    train_prompts = _load_prompt_dataset(config, "train", tokenizer)
+    eval_prompts = _load_prompt_dataset(config, "eval", tokenizer)
     if not train_prompts:
         log.warning("[RL] No training prompts; skipping RL phase.")
         return

@@ -182,15 +182,26 @@ class AgentModelHandler:
                 repetition_penalty=1.1,
             )
 
-            # Load the base system prompt
-            prompt_file = os.path.join(
-                os.path.abspath(os.path.dirname(__file__)), "sys_prompt.txt"
+            # Generate system prompt dynamically matching training format
+            tools_str = "{}"
+            try:
+                if self.mcp_client and hasattr(self.mcp_client, 'available_tools'):
+                    tools_str = json.dumps(self.mcp_client.available_tools, indent=2)
+            except Exception as e:
+                self.logger.warning(f"Could not load tools for sys_prompt: {e}")
+                
+            self.sys_prompt = (
+                "You are an AI assistant that can use tools to help solve problems. "
+                "You have access to the following tools:\n"
+                f"{tools_str}\n\n"
+                "To use a tool, respond with the exact XML-like tags:\n"
+                "<tool_use>\n"
+                "<tool_name>name of tool</tool_name>\n"
+                "<parameters>\n"
+                "{\"param\": \"value\"}\n"
+                "</parameters>\n"
+                "</tool_use>"
             )
-            if not os.path.exists(prompt_file):
-                raise FileNotFoundError(f"{prompt_file} not found!")
-
-            with open(prompt_file, "r") as f:
-                self.sys_prompt = f.read()
 
             # Initialize pipeline for easier generation
             self.pipeline = pipeline(
@@ -224,51 +235,21 @@ class AgentModelHandler:
         Returns:
             Formatted prompt string
         """
-        # Keep our chat history manageable so we don't quickly fill the
-        # model's context window
-        if chat_history and len(chat_history) > 50:
-            chat_history = chat_history[-50:]
-
+        messages = []
+        if self.sys_prompt:
+            messages.append({"role": "system", "content": self.sys_prompt})
+            
+        if chat_history:
+            for h in chat_history[-50:]:  # Keep history manageable
+                messages.append({"role": "user", "content": h["user"]})
+                messages.append({"role": "assistant", "content": h["assistant"]})
+                
+        user_msg = instruction
         if input_text:
-            if chat_history:
-                history_str = "\n".join(
-                    [
-                        f"User: {h['user']}\nAssistant: {h['assistant']}"
-                        for h in chat_history
-                    ]
-                )
-                full_prompt = (
-                    f"{self.sys_prompt}\n\n### Conversation History:\n{history_str}\n\n"
-                    f"### Instruction:\n{instruction}\n\n"
-                    f"### Input:\n{input_text}\n\n"
-                    f"### Response:\n"
-                )
-            else:
-                full_prompt = (
-                    f"{self.sys_prompt}\n\n"
-                    f"### Instruction:\n{instruction}\n\n"
-                    f"### Input:\n{input_text}\n\n"
-                    f"### Response:\n"
-                )
-        elif chat_history:
-            history_str = "\n".join(
-                [
-                    f"User: {h['user']}\nAssistant: {h['assistant']}"
-                    for h in chat_history
-                ]
-            )
-            full_prompt = (
-                f"{self.sys_prompt}\n\n### Conversation History:\n{history_str}\n\n"
-                f"### Instruction:\n{instruction}\n\n"
-                f"### Response:\n"
-            )
-        else:
-            full_prompt = (
-                f"{self.sys_prompt}\n\n### Instruction:\n{instruction}\n\n"
-                f"### Response:\n"
-            )
-
-        return full_prompt
+            user_msg += f"\n\nInput:\n{input_text}"
+            
+        messages.append({"role": "user", "content": user_msg})
+        return self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
     async def chat(self) -> None:
         """

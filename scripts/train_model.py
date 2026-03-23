@@ -114,14 +114,23 @@ class AgentTrainer:
             texts = []
 
             for i in range(len(examples["instruction"])):
+                system = examples.get("system", [""] * len(examples["instruction"]))[i]
                 instruction = examples["instruction"][i]
                 input_text = examples["input"][i] or ""
                 output = examples["output"][i]
 
                 if input_text:
-                    text = f"### Instruction:\n{instruction}\n\n### Input:\n{input_text}\n\n### Response:\n{output}"
+                    user_msg = f"{instruction}\n\nInput:\n{input_text}"
                 else:
-                    text = f"### Instruction:\n{instruction}\n\n### Response:\n{output}"
+                    user_msg = instruction
+                
+                messages = []
+                if system:
+                    messages.append({"role": "system", "content": system})
+                messages.append({"role": "user", "content": user_msg})
+                
+                prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                text = prompt + output + self.tokenizer.eos_token
 
                 texts.append(text)
 

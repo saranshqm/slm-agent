@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 @dataclass
 class AgenticExample:
+    system: str
     instruction: str
     input: str
     output: str
@@ -35,65 +36,119 @@ class AgenticDatasetBuilder:
             },
         }
 
+    def _get_system_prompt(self) -> str:
+        tools_str = json.dumps(self.available_tools, indent=2)
+        return (
+            "You are an AI assistant that can use tools to help solve problems. "
+            "You have access to the following tools:\n"
+            f"{tools_str}\n\n"
+            "To use a tool, respond with the exact XML-like tags:\n"
+            "<tool_use>\n"
+            "<tool_name>name of tool</tool_name>\n"
+            "<parameters>\n"
+            "{\"param\": \"value\"}\n"
+            "</parameters>\n"
+            "</tool_use>"
+        )
+
     # =========================
     # SINGLE STEP
     # =========================
-    def create_tool_usage_example(self, tool_name: str, scenario: str) -> AgenticExample:
-        instruction = f"Help me with: {scenario}"
+    def create_tool_usage_example(self, tool_name: str, scenario: str) -> List[AgenticExample]:
+        system_prompt = self._get_system_prompt()
+        original_request = f"Help me with: {scenario}"
+        examples = []
 
+        # Step 1: The model should predict the tool call
         thought = f"I need to use {tool_name} to gather information about {scenario}."
         tool_call = self._generate_tool_call(tool_name, scenario)
-        observation = self._generate_observation(tool_name, scenario)
-
-        final_answer = f"Based on the gathered information, I have completed the task related to {scenario}."
-
-        output = f"""
-Thought: {thought}
-
-Action:
-{tool_call}
-
-Observation: {observation}
-
-Final Answer: {final_answer}
-"""
-
-        return AgenticExample(
-            instruction=instruction,
+        
+        examples.append(AgenticExample(
+            system=system_prompt,
+            instruction=original_request,
             input="",
-            output=output.strip(),
+            output=f"Thought: {thought}\n\nAction:\n{tool_call}",
             tools_used=[tool_name],
             complexity="simple",
+        ))
+
+        # Step 2: The model should predict the final answer given the tool result
+        observation = self._generate_observation(tool_name, scenario)
+        tool_results_text = f"Tool: {tool_name}\nResult: {observation}\n"
+        
+        current_instruction = (
+            f"Based on the following tool results, provide a comprehensive response:\n\n"
+            f"{tool_results_text}\n\nOriginal request: {original_request}"
         )
+        
+        final_answer = f"Based on the gathered information, I have completed the task related to {scenario}."
+        
+        examples.append(AgenticExample(
+            system=system_prompt,
+            instruction=current_instruction,
+            input="",
+            output=f"Final Answer: {final_answer}",
+            tools_used=[tool_name],
+            complexity="simple",
+        ))
+
+        return examples
 
     # =========================
     # MULTI STEP
     # =========================
-    def create_multi_step_example(self, scenario: str, tools: List[str]) -> AgenticExample:
-        instruction = f"Help me with this task: {scenario}"
-
-        output_parts = []
+    def create_multi_step_example(self, scenario: str, tools: List[str]) -> List[AgenticExample]:
+        system_prompt = self._get_system_prompt()
+        original_request = f"Help me with this task: {scenario}"
+        examples = []
+        
+        tool_results_history = []
 
         for i, tool in enumerate(tools):
             thought = f"Step {i+1}: I should use {tool} to progress on {scenario}."
             tool_call = self._generate_tool_call(tool, scenario)
+            
+            # Determine the instruction for the current step
+            if i == 0:
+                current_instruction = original_request
+            else:
+                tool_results_text = "\n".join(tool_results_history)
+                current_instruction = (
+                    f"Based on the following tool results, provide a comprehensive response:\n\n"
+                    f"{tool_results_text}\n\nOriginal request: {original_request}"
+                )
+                
+            examples.append(AgenticExample(
+                system=system_prompt,
+                instruction=current_instruction,
+                input="",
+                output=f"Thought: {thought}\n\nAction:\n{tool_call}",
+                tools_used=tools,
+                complexity="complex",
+            ))
+            
+            # Simulate the environment observation
             observation = self._generate_observation(tool, scenario)
+            tool_results_history.append(f"Tool: {tool}\nResult: {observation}\n")
 
-            output_parts.append(f"Thought: {thought}")
-            output_parts.append(f"Action:\n{tool_call}")
-            output_parts.append(f"Observation: {observation}\n")
-
-        output_parts.append(
-            f"Final Answer: I have completed the multi-step task for {scenario} using the available tools."
+        # The final step: emitting the final answer
+        tool_results_text = "\n".join(tool_results_history)
+        current_instruction = (
+            f"Based on the following tool results, provide a comprehensive response:\n\n"
+            f"{tool_results_text}\n\nOriginal request: {original_request}"
         )
-
-        return AgenticExample(
-            instruction=instruction,
+        final_answer = f"I have completed the multi-step task for {scenario} using the available tools."
+        
+        examples.append(AgenticExample(
+            system=system_prompt,
+            instruction=current_instruction,
             input="",
-            output="\n".join(output_parts),
+            output=f"Final Answer: {final_answer}",
             tools_used=tools,
             complexity="complex",
-        )
+        ))
+
+        return examples
 
     # =========================
     # TOOL CALL
@@ -168,6 +223,7 @@ Final Answer: {final_answer}
     def _to_dict(self, example: AgenticExample) -> Dict[str, Any]:
         
         return {
+            "system": example.system,
             "instruction": example.instruction,
             "input": example.input,
             "output": example.output,
@@ -181,16 +237,18 @@ Final Answer: {final_answer}
         for _ in range(single_tool_count):
             tool = random.choice(list(self.available_tools.keys()))
             scenario = self._generate_random_scenario(tool)
-            example = self.create_tool_usage_example(tool, scenario)
-            examples.append(self._to_dict(example))
+            step_examples = self.create_tool_usage_example(tool, scenario)
+            for ex in step_examples:
+                examples.append(self._to_dict(ex))
 
         multi_step_count = num_examples - single_tool_count
         for _ in range(multi_step_count):
             num_tools = random.randint(2, min(3, len(self.available_tools)))
             tools = random.sample(list(self.available_tools.keys()), num_tools)
             scenario = self._generate_multi_step_scenario()
-            example = self.create_multi_step_example(scenario, tools)
-            examples.append(self._to_dict(example))
+            step_examples = self.create_multi_step_example(scenario, tools)
+            for ex in step_examples:
+                examples.append(self._to_dict(ex))
 
         return examples
 

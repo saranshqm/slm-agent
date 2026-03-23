@@ -16,16 +16,17 @@ _PARAMS_RE = re.compile(r"<parameters>\s*([\s\S]*?)\s*</parameters>", re.IGNOREC
 
 def score_tool_completion(text: str, weights: dict[str, float] | None = None) -> float:
     """
-    Higher is better. Designed for the project's Thought / Action / tool_use / Final Answer schema.
+    Higher is better. Designed for the step-by-step Agentic schema.
+    A valid completion should EITHER be a tool call (Thought + Action) OR a Final Answer.
     """
     w = {
-        "thought": 0.18,
-        "action": 0.12,
-        "tool_use_pair": 0.22,
-        "tool_name_ok": 0.2,
-        "json_ok": 0.28,
-        "final_answer": 0.12,
-        "length_penalty": 0.08,
+        "thought": 0.20,
+        "action": 0.20,
+        "tool_use_pair": 0.20,
+        "tool_name_ok": 0.15,
+        "json_ok": 0.25,
+        "final_answer": 0.80,  # High reward for proper final answer format
+        "hallucination_penalty": 0.50, # Penalize generating both tool call AND final answer
         "garbage_penalty": 0.15,
     }
     if weights:
@@ -37,42 +38,49 @@ def score_tool_completion(text: str, weights: dict[str, float] | None = None) ->
     t = text.strip()
     score = 0.0
 
-    if re.search(r"\bThought:", t, re.IGNORECASE) or re.search(r"Thought:\s*Step", t, re.IGNORECASE):
+    has_thought = re.search(r"\bThought:", t, re.IGNORECASE) or re.search(r"Thought:\s*Step", t, re.IGNORECASE)
+    has_action = re.search(r"\bAction:", t, re.IGNORECASE)
+    has_tool_pair = "<tool_use>" in t and "</tool_use>" in t
+    has_final_answer = re.search(r"Final Answer:", t, re.IGNORECASE)
+
+    if has_thought:
         score += w["thought"]
 
-    if re.search(r"\bAction:", t, re.IGNORECASE):
+    # If it's a tool call step
+    if has_action and has_tool_pair:
         score += w["action"]
-
-    if "<tool_use>" in t and "</tool_use>" in t:
         score += w["tool_use_pair"]
 
-    for m in _TOOL_NAME_RE.finditer(t):
-        name = m.group(1).strip()
-        if name in ALLOWED_TOOL_NAMES:
+        # Check valid tool names
+        m_name = _TOOL_NAME_RE.search(t)
+        if m_name and m_name.group(1).lower() in ALLOWED_TOOL_NAMES:
             score += w["tool_name_ok"]
-            break
 
-    json_hits = 0
-    for m in _PARAMS_RE.finditer(t):
-        body = m.group(1).strip()
-        try:
-            obj = json.loads(body)
-            if isinstance(obj, dict) and len(obj) > 0:
-                json_hits += 1
-                score += w["json_ok"]
-        except (json.JSONDecodeError, TypeError):
-            score -= 0.12
+        # Check JSON validity
+        m_params = _PARAMS_RE.findall(t)
+        json_hits = 0
+        for params_str in m_params:
+            try:
+                obj = json.loads(params_str.strip())
+                if isinstance(obj, dict):
+                    json_hits += 1
+            except (json.JSONDecodeError, TypeError):
+                pass
+        
+        if json_hits > 0:
+            score += w["json_ok"]
+        else:
+            score -= 0.15
 
-    if json_hits > 1:
-        score += 0.05 * (json_hits - 1)
-
-    if re.search(r"Final Answer:", t, re.IGNORECASE):
+    # If it's a final answer step
+    elif has_final_answer:
         score += w["final_answer"]
 
-    ln = len(t)
-    if ln > 3500:
-        score -= w["length_penalty"] * min(3.0, (ln - 3500) / 1500.0)
+    # Penalize if it tries to do BOTH (hallucinating observations)
+    if has_action and has_final_answer:
+        score -= w["hallucination_penalty"]
 
+    # Garbage penalties
     ctrl = sum(1 for c in t if ord(c) < 32 and c not in "\n\r\t")
     if ctrl > 0:
         score -= w["garbage_penalty"] * min(5.0, ctrl / 5.0)

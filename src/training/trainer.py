@@ -22,6 +22,44 @@ from transformers import (
     TrainerCallback,
     TrainingArguments,
 )
+from transformers.cache_utils import DynamicCache
+
+# Monkeypatch DynamicCache for transformers 5.x compatibility with Phi-3 modeling code
+try:
+    if not hasattr(DynamicCache, "from_legacy_cache"):
+        @classmethod
+        def from_legacy_cache(cls, past_key_values):
+            cache = cls()
+            if past_key_values is not None:
+                for layer_idx in range(len(past_key_values)):
+                    key_states, value_states = past_key_values[layer_idx]
+                    cache.update(key_states, value_states, layer_idx)
+            return cache
+        DynamicCache.from_legacy_cache = from_legacy_cache
+
+    if not hasattr(DynamicCache, "to_legacy_cache"):
+        def to_legacy_cache(self):
+            return tuple(self)
+        DynamicCache.to_legacy_cache = to_legacy_cache
+
+    if not hasattr(DynamicCache, "seen_tokens"):
+        DynamicCache.seen_tokens = property(lambda self: self.get_seq_length(0))
+        
+    if not hasattr(DynamicCache, "get_max_length"):
+        def get_max_length(self, layer_idx: int = 0) -> int:
+            return self.get_max_cache_shape(layer_idx)
+        DynamicCache.get_max_length = get_max_length
+        
+    if not hasattr(DynamicCache, "get_usable_length"):
+        def get_usable_length(self, new_seq_length: int, layer_idx: int = 0) -> int:
+            max_length = self.get_max_cache_shape(layer_idx)
+            prev = self.get_seq_length(layer_idx)
+            if max_length is not None and max_length > 0 and prev + new_seq_length > max_length:
+                return max_length - new_seq_length
+            return prev
+        DynamicCache.get_usable_length = get_usable_length
+except Exception as ex:
+    pass
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -36,15 +74,22 @@ TOOL_SPECIAL_TOKENS = [
 ]
 
 
-def _format_example(instruction: str, input_text: str | None, output: str) -> tuple[str, str]:
+def _format_example(tokenizer: Any, system: str, instruction: str, input_text: str | None, output: str) -> tuple[str, str]:
     """Returns (prompt_prefix, full_text). Loss is applied only on tokens after prompt_prefix."""
+    user_msg = instruction
     if input_text:
-        prompt = (
-            f"### Instruction:\n{instruction}\n\n### Input:\n{input_text}\n\n### Response:\n"
-        )
-    else:
-        prompt = f"### Instruction:\n{instruction}\n\n### Response:\n"
-    return prompt, prompt + output
+        user_msg += f"\n\nInput:\n{input_text}"
+        
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": user_msg})
+    
+    prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    
+    # Append the actual output, and crucially add EOS token so model learns to stop
+    full_text = prompt + output + tokenizer.eos_token
+    return prompt, full_text
 
 
 class AgentDataCollator:
@@ -191,13 +236,14 @@ class AgentTrainer:
         prompts: list[str] = []
         full_texts: list[str] = []
 
-        for instruction, input_text, output in zip(
+        for system, instruction, input_text, output in zip(
+            examples.get("system", [""] * len(examples["instruction"])),
             examples["instruction"],
             examples["input"],
             examples["output"],
         ):
             inp = (input_text or "").strip()
-            prompt, full = _format_example(instruction, inp if inp else None, output)
+            prompt, full = _format_example(self.tokenizer, system, instruction, inp if inp else None, output)
             prompts.append(prompt)
             full_texts.append(full)
 
@@ -339,7 +385,6 @@ class AgentTrainer:
             bf16=bf16,
             gradient_checkpointing=bool(t.get("gradient_checkpointing", True)),
             optim=str(t.get("optim", "adamw_torch")),
-            group_by_length=bool(t.get("group_by_length", False)),
             remove_unused_columns=False,
             report_to=report_list,
             save_total_limit=int(t.get("save_total_limit", 3)),
@@ -363,7 +408,7 @@ class AgentTrainer:
             args=args,
             train_dataset=self.train_dataset,
             eval_dataset=self.eval_dataset,
-            tokenizer=self.tokenizer,
+            processing_class=self.tokenizer,
             data_collator=collator,
             callbacks=[MetricsLoggingCallback()],
         )
