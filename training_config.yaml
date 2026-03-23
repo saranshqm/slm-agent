@@ -43,8 +43,8 @@ quantization:
   bnb_4bit_use_double_quant: false
 
 data:
-  train_dataset: "./data/processed/train_dataset.json"
-  eval_dataset: "./data/processed/eval_dataset.json"
+  train_dataset: "/content/train_dataset.json"
+  eval_dataset: "/content/eval_dataset.json"
   max_seq_length: 2048
   train_split: 0.9
   seed: 42
