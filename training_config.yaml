@@ -21,7 +21,7 @@ training:
   gradient_accumulation_steps: 4
   optim: "paged_adamw_32bit"
   save_steps: 500
-  logging_steps: 10
+  logging_steps: 1
   learning_rate: 2.0e-5
   weight_decay: 0.001
   fp16: false
